@@ -354,27 +354,28 @@ export const getParsedErrorWithAllAbis = (error: any, chainId: AllowedChainIds):
     }
 
     try {
-      // Get all deployed contracts for the current chain
-      const chainContracts = deployedContractsData[chainId as keyof typeof deployedContractsData];
+      // Get all deployed AND external contracts for the current chain
+      const deployedChainContracts = deployedContractsData[chainId as keyof typeof deployedContractsData] ?? {};
+      const externalChainContracts =
+        (externalContractsData as Record<number, Record<string, { abi?: readonly any[] }>>)[chainId as number] ?? {};
 
-      if (!chainContracts) {
+      if (!deployedChainContracts && !externalChainContracts) {
         return originalParsedError;
       }
 
-      // Build a lookup table of error signatures to error names
+      // Build a lookup table of error signatures to error names from both sources
       const errorLookup: Record<string, { name: string; contract: string; signature: string }> = {};
 
-      Object.entries(chainContracts).forEach(([contractName, contract]: [string, any]) => {
-        if (contract.abi) {
+      const indexAbis = (entries: Record<string, { abi?: readonly any[] }>) => {
+        Object.entries(entries).forEach(([contractName, contract]: [string, any]) => {
+          if (!contract?.abi) return;
           contract.abi.forEach((item: any) => {
             if (item.type === "error") {
-              // Create the proper error signature like Solidity does
               const errorName = item.name;
               const inputs = item.inputs || [];
               const inputTypes = inputs.map((input: any) => input.type).join(",");
               const errorSignature = `${errorName}(${inputTypes})`;
 
-              // Hash the signature and take the first 4 bytes (8 hex chars)
               const hash = keccak256(toHex(errorSignature));
               const errorSelector = hash.slice(0, 10); // 0x + 8 chars = 10 total
 
@@ -385,8 +386,11 @@ export const getParsedErrorWithAllAbis = (error: any, chainId: AllowedChainIds):
               };
             }
           });
-        }
-      });
+        });
+      };
+
+      indexAbis(deployedChainContracts as Record<string, { abi?: readonly any[] }>);
+      indexAbis(externalChainContracts as Record<string, { abi?: readonly any[] }>);
 
       // Check if we can find the error in our lookup
       const errorInfo = errorLookup[signature];

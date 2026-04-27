@@ -1,16 +1,92 @@
 import { GenericContractsDeclaration } from "~~/utils/scaffold-eth/contract";
 
-/**
- * @example
- * const externalContracts = {
- *   1: {
- *     DAI: {
- *       address: "0x...",
- *       abi: [...],
- *     },
- *   },
- * } as const;
- */
-const externalContracts = {} as const;
+const externalContracts = {
+  8453: {
+    CLAWD: {
+      address: "0x9f86dB9fc6f7c9408e8Fda3Ff8ce4e78ac7a6b07",
+      abi: [
+        {
+          type: "function",
+          name: "balanceOf",
+          inputs: [{ name: "account", type: "address" }],
+          outputs: [{ name: "", type: "uint256" }],
+          stateMutability: "view",
+        },
+        {
+          type: "function",
+          name: "allowance",
+          inputs: [
+            { name: "owner", type: "address" },
+            { name: "spender", type: "address" },
+          ],
+          outputs: [{ name: "", type: "uint256" }],
+          stateMutability: "view",
+        },
+        {
+          type: "function",
+          name: "approve",
+          inputs: [
+            { name: "spender", type: "address" },
+            { name: "amount", type: "uint256" },
+          ],
+          outputs: [{ name: "", type: "bool" }],
+          stateMutability: "nonpayable",
+        },
+        {
+          type: "function",
+          name: "decimals",
+          inputs: [],
+          outputs: [{ name: "", type: "uint8" }],
+          stateMutability: "view",
+        },
+        {
+          type: "function",
+          name: "symbol",
+          inputs: [],
+          outputs: [{ name: "", type: "string" }],
+          stateMutability: "view",
+        },
+        {
+          type: "error",
+          name: "ERC20InsufficientAllowance",
+          inputs: [
+            { name: "spender", type: "address" },
+            { name: "allowance", type: "uint256" },
+            { name: "needed", type: "uint256" },
+          ],
+        },
+        {
+          type: "error",
+          name: "ERC20InsufficientBalance",
+          inputs: [
+            { name: "sender", type: "address" },
+            { name: "balance", type: "uint256" },
+            { name: "needed", type: "uint256" },
+          ],
+        },
+        {
+          type: "error",
+          name: "ERC20InvalidApprover",
+          inputs: [{ name: "approver", type: "address" }],
+        },
+        {
+          type: "error",
+          name: "ERC20InvalidSpender",
+          inputs: [{ name: "spender", type: "address" }],
+        },
+        {
+          type: "error",
+          name: "ERC20InvalidReceiver",
+          inputs: [{ name: "receiver", type: "address" }],
+        },
+        {
+          type: "error",
+          name: "ERC20InvalidSender",
+          inputs: [{ name: "sender", type: "address" }],
+        },
+      ] as const,
+    },
+  },
+} as const satisfies GenericContractsDeclaration;
 
-export default externalContracts satisfies GenericContractsDeclaration;
+export default externalContracts;

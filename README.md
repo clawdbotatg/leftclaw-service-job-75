@@ -1,83 +1,73 @@
-# 🏗 Scaffold-ETH 2
+# Zeitgeist 🔮
 
-<h4 align="center">
-  <a href="https://docs.scaffoldeth.io">Documentation</a> |
-  <a href="https://scaffoldeth.io">Website</a>
-</h4>
+Pay $0.25 in ETH or CLAWD on Base mainnet, get an AI-synthesized cultural snapshot of any group — meme image plus written analysis pulled from real-time web signals.
 
-🧪 An open-source, up-to-date toolkit for building decentralized applications (dapps) on the Ethereum blockchain. It's designed to make it easier for developers to create and deploy smart contracts and build user interfaces that interact with those contracts.
+- **Live frontend**: TBD (deployed to IPFS via bgipfs)
+- **Smart contract**: [`ZeitgeistPayment` on Base](https://basescan.org/address/0x45fAeA3de5f9B6D4758EA1907eDc6B127E26081F) — verified
+- **Networks**: Base mainnet (chain id 8453)
 
-> [!NOTE]
-> 🤖 Scaffold-ETH 2 is AI-ready! It has everything agents need to build on Ethereum. Check `.agents/`, `.claude/`, `.opencode` or `.cursor/` for more info.
+## How it works
 
-⚙️ Built using NextJS, RainbowKit, Foundry, Wagmi, Viem, and Typescript.
+1. User connects a wallet, types a cultural group ("Jets fans", "TikTok traders", "Crypto Twitter"), and chooses ETH or CLAWD as payment.
+2. The payment is sent to `ZeitgeistPayment` on Base. The contract converts the $0.25 USD price into ETH using a Chainlink ETH/USD feed (with sequencer-uptime and staleness/bound checks), or accepts a fixed CLAWD amount.
+3. The contract emits `QueryPaid(user, groupName, amount, isClawd)`. The frontend reads the resulting tx hash and polls a Vercel-hosted `/api/zeitgeist?txHash=...&groupName=...` endpoint.
+4. The backend verifies the on-chain event, fans out to Brave Search for real-time signal, runs synthesis through GPT-4o, and generates a meme image with DALL-E. The result is cached in Vercel KV for 24h keyed by `(txHash, groupName)`.
+5. The user gets back a meme image, a one-line mood headline, a few bullet signals, and a TLDR.
 
-- ✅ **Contract Hot Reload**: Your frontend auto-adapts to your smart contract as you edit it.
-- 🪝 **[Custom hooks](https://docs.scaffoldeth.io/hooks/)**: Collection of React hooks wrapper around [wagmi](https://wagmi.sh/) to simplify interactions with smart contracts with typescript autocompletion.
-- 🧱 [**Components**](https://docs.scaffoldeth.io/components/): Collection of common web3 components to quickly build your frontend.
-- 🔥 **Burner Wallet & Local Faucet**: Quickly test your application with a burner wallet and local faucet.
-- 🔐 **Integration with Wallet Providers**: Connect to different wallet providers and interact with the Ethereum network.
-
-![Debug Contracts tab](https://github.com/scaffold-eth/scaffold-eth-2/assets/55535804/b237af0c-5027-4849-a5c1-2e31495cccb1)
-
-## Requirements
-
-Before you begin, you need to install the following tools:
-
-- [Node (>= v20.18.3)](https://nodejs.org/en/download/)
-- Yarn ([v1](https://classic.yarnpkg.com/en/docs/install/) or [v2+](https://yarnpkg.com/getting-started/install))
-- [Git](https://git-scm.com/downloads)
-
-## Quickstart
-
-To get started with Scaffold-ETH 2, follow the steps below:
-
-1. Install dependencies if it was skipped in CLI:
+## Architecture
 
 ```
-cd my-dapp-example
+Browser (IPFS-hosted Next.js static export)
+   │
+   │ writeContract: queryETH / queryCLAWD on Base
+   ▼
+ZeitgeistPayment.sol  ──emits──►  QueryPaid event
+   │
+   │ tx hash + groupName
+   ▼
+GET /api/zeitgeist  (Vercel runtime)
+   │
+   ├─► Vercel KV cache (24h TTL)
+   ├─► Base RPC (verify QueryPaid via getTransactionReceipt)
+   ├─► Brave Search API
+   └─► OpenAI GPT-4o + DALL-E 3
+```
+
+The frontend is a **static Next.js export hosted on IPFS** (no API routes shipped). The API stub at `app/api/zeitgeist/route.ts` returns a 503 in the static build; the real implementation lives in `app/api/zeitgeist/pipeline.ts` and runs on a separate Vercel deployment.
+
+## Two-deployment setup
+
+1. **Static frontend** → IPFS (bgipfs).
+   ```bash
+   cd packages/nextjs
+   NEXT_PUBLIC_IPFS_BUILD=true yarn build
+   npx bgipfs upload out
+   ```
+2. **Backend API** → Vercel.
+   - Set the env vars listed in `packages/nextjs/.env.example` under "Backend".
+   - Replace the stub `app/api/zeitgeist/route.ts` with a thin wrapper that calls `runZeitgeistPipeline` from `pipeline.ts` (and remove `dynamic = "force-static"`).
+   - Deploy to Vercel: `yarn vercel --prod`.
+   - Point `NEXT_PUBLIC_API_URL` in the IPFS build to the Vercel URL and rebuild the static site.
+
+## Local development
+
+```bash
 yarn install
+yarn chain          # local Anvil
+yarn deploy         # deploy ZeitgeistPayment locally
+yarn start          # frontend at http://localhost:3000
 ```
 
-2. Run a local network in the first terminal:
+## Contract details
 
-```
-yarn chain
-```
+`ZeitgeistPayment` is `Ownable2Step` and `ReentrancyGuard`. ETH conversion uses Chainlink ETH/USD on Base with:
+- Sequencer-uptime feed check (rejects calls during a recent L2 outage + 1h grace)
+- 1h staleness window on the price update
+- Min/max answer bounds (`$1` to `$1,000,000`)
+- 1% slippage buffer accepted on `queryETH`; the contract refunds the excess.
 
-This command starts a local Ethereum network using Foundry. The network runs on your local machine and can be used for testing and development. You can customize the network configuration in `packages/foundry/foundry.toml`.
+Owner-only withdrawals (`withdraw`, `withdrawCLAWD`, `withdrawETH`) and `setQueryPriceCLAWD` for adjusting the CLAWD price.
 
-3. On a second terminal, deploy the test contract:
+## Built with
 
-```
-yarn deploy
-```
-
-This command deploys a test smart contract to the local network. The contract is located in `packages/foundry/contracts` and can be modified to suit your needs. The `yarn deploy` command uses the deploy script located in `packages/foundry/script` to deploy the contract to the network. You can also customize the deploy script.
-
-4. On a third terminal, start your NextJS app:
-
-```
-yarn start
-```
-
-Visit your app on: `http://localhost:3000`. You can interact with your smart contract using the `Debug Contracts` page. You can tweak the app config in `packages/nextjs/scaffold.config.ts`.
-
-Run smart contract test with `yarn foundry:test`
-
-- Edit your smart contracts in `packages/foundry/contracts`
-- Edit your frontend homepage at `packages/nextjs/app/page.tsx`. For guidance on [routing](https://nextjs.org/docs/app/building-your-application/routing/defining-routes) and configuring [pages/layouts](https://nextjs.org/docs/app/building-your-application/routing/pages-and-layouts) checkout the Next.js documentation.
-- Edit your deployment scripts in `packages/foundry/script`
-
-
-## Documentation
-
-Visit our [docs](https://docs.scaffoldeth.io) to learn how to start building with Scaffold-ETH 2.
-
-To know more about its features, check out our [website](https://scaffoldeth.io).
-
-## Contributing to Scaffold-ETH 2
-
-We welcome contributions to Scaffold-ETH 2!
-
-Please see [CONTRIBUTING.MD](https://github.com/scaffold-eth/scaffold-eth-2/blob/main/CONTRIBUTING.md) for more information and guidelines for contributing to Scaffold-ETH 2.
+Scaffold-ETH 2 (Foundry flavor) · Next.js 15 · wagmi · viem · RainbowKit · DaisyUI · OpenZeppelin Contracts.
