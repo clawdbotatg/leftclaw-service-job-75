@@ -5,6 +5,7 @@ import { Ownable } from "@openzeppelin/contracts/access/Ownable.sol";
 import { Ownable2Step } from "@openzeppelin/contracts/access/Ownable2Step.sol";
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import { ReentrancyGuard } from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 /// @notice Minimal Chainlink AggregatorV3Interface (defined inline to avoid extra dependency).
 interface AggregatorV3Interface {
@@ -23,7 +24,7 @@ interface AggregatorV3Interface {
  *         a fixed USD amount ($0.25). CLAWD price is owner-configurable (no oracle).
  * @dev Owner is set at deployment via Ownable2Step; ownership transfer is two-step.
  */
-contract ZeitgeistPayment is Ownable2Step {
+contract ZeitgeistPayment is Ownable2Step, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
     // ---------------------------------------------------------------------
@@ -33,8 +34,20 @@ contract ZeitgeistPayment is Ownable2Step {
     /// @notice Target USD price per query, scaled to 18 decimals: $0.25 == 25 * 10**16.
     uint256 public constant USD_PRICE_18 = 25 * 1e16;
 
-    /// @notice Maximum allowed staleness of the Chainlink price feed (1 hour).
-    uint256 public constant MAX_PRICE_STALENESS = 1 hours;
+    /// @notice Maximum allowed staleness of the Chainlink price feed.
+    /// @dev Base ETH/USD heartbeat is ~20 minutes; 25 minutes gives a small buffer.
+    uint256 public constant MAX_PRICE_STALENESS = 25 minutes;
+
+    /// @notice L2 sequencer grace period after restart before price feeds are trusted again.
+    uint256 public constant GRACE_PERIOD = 1 hours;
+
+    /// @notice Minimum allowed ETH/USD answer ($100, 8 decimals). Any price at or below this is
+    ///         treated as a malfunctioning feed (ETH has never been below $100).
+    int256 public constant MIN_ANSWER = 100e8;
+
+    /// @notice Maximum allowed ETH/USD answer ($1,000,000, 8 decimals). Any price at or above this
+    ///         is treated as a malfunctioning feed (very generous upper bound).
+    int256 public constant MAX_ANSWER = 1_000_000e8;
 
     // ---------------------------------------------------------------------
     // Immutable state
@@ -42,6 +55,9 @@ contract ZeitgeistPayment is Ownable2Step {
 
     /// @notice Chainlink ETH/USD price feed.
     AggregatorV3Interface public immutable priceFeed;
+
+    /// @notice Chainlink L2 sequencer uptime feed (Base).
+    AggregatorV3Interface public immutable sequencerFeed;
 
     /// @notice CLAWD token contract.
     IERC20 public immutable clawd;
@@ -80,9 +96,12 @@ contract ZeitgeistPayment is Ownable2Step {
     // ---------------------------------------------------------------------
 
     error InvalidPriceFeed();
+    error InvalidSequencerFeed();
     error InvalidClawdToken();
     error InvalidPrice();
     error StalePrice(uint256 updatedAt, uint256 nowAt);
+    error SequencerDown();
+    error SequencerGracePeriod(uint256 availableAt);
     error InsufficientETH(uint256 sent, uint256 required);
     error InsufficientCLAWD(uint256 sent, uint256 required);
     error RefundFailed();
@@ -95,20 +114,25 @@ contract ZeitgeistPayment is Ownable2Step {
 
     /**
      * @param _priceFeed Chainlink ETH/USD aggregator address.
+     * @param _sequencerFeed Chainlink L2 sequencer uptime feed address (Base).
      * @param _clawd CLAWD ERC20 token address.
      * @param _initialOwner Address that will own the contract (passed to Ownable).
      * @param _initialQueryPriceCLAWD Initial CLAWD price per query (in CLAWD base units).
      */
     constructor(
         address _priceFeed,
+        address _sequencerFeed,
         address _clawd,
         address _initialOwner,
         uint256 _initialQueryPriceCLAWD
     ) Ownable(_initialOwner) {
         if (_priceFeed == address(0)) revert InvalidPriceFeed();
+        if (_sequencerFeed == address(0)) revert InvalidSequencerFeed();
         if (_clawd == address(0)) revert InvalidClawdToken();
+        if (_initialQueryPriceCLAWD == 0) revert InvalidPrice();
 
         priceFeed = AggregatorV3Interface(_priceFeed);
+        sequencerFeed = AggregatorV3Interface(_sequencerFeed);
         clawd = IERC20(_clawd);
         queryPriceCLAWD = _initialQueryPriceCLAWD;
 
@@ -125,7 +149,7 @@ contract ZeitgeistPayment is Ownable2Step {
      *         Overpayment is refunded to the caller.
      * @param groupName The cultural group name being queried (emitted in the event).
      */
-    function queryETH(string calldata groupName) external payable {
+    function queryETH(string calldata groupName) external payable nonReentrant {
         uint256 required = ethRequired();
         if (msg.value < required) revert InsufficientETH(msg.value, required);
 
@@ -161,12 +185,23 @@ contract ZeitgeistPayment is Ownable2Step {
     /**
      * @notice Computes the ETH amount (in wei) currently required for one query, equal to
      *         `USD_PRICE_18` worth of ETH at the latest Chainlink price.
-     * @dev Reverts if the price is non-positive or stale (>1 hour old).
+     * @dev Reverts if the L2 sequencer is down or within its grace period, if the price is
+     *      non-positive, stale, out of bounds, or from an incomplete round.
      */
     function ethRequired() public view returns (uint256) {
-        (, int256 answer, , uint256 updatedAt, ) = priceFeed.latestRoundData();
+        // L2 sequencer uptime check (Base is OP-stack L2).
+        // sequencerAnswer: 0 = sequencer up, 1 = sequencer down.
+        (, int256 sequencerAnswer, uint256 sequencerStartedAt, , ) = sequencerFeed.latestRoundData();
+        if (sequencerAnswer != 0) revert SequencerDown();
+        if (block.timestamp - sequencerStartedAt < GRACE_PERIOD) {
+            revert SequencerGracePeriod(sequencerStartedAt + GRACE_PERIOD);
+        }
+
+        (uint80 roundId, int256 answer, , uint256 updatedAt, uint80 answeredInRound) = priceFeed.latestRoundData();
         if (answer <= 0) revert InvalidPrice();
-        if (block.timestamp > updatedAt && block.timestamp - updatedAt > MAX_PRICE_STALENESS) {
+        if (answer <= MIN_ANSWER || answer >= MAX_ANSWER) revert InvalidPriceFeed();
+        if (answeredInRound < roundId) revert StalePrice(updatedAt, block.timestamp);
+        if (updatedAt == 0 || block.timestamp - updatedAt > MAX_PRICE_STALENESS) {
             revert StalePrice(updatedAt, block.timestamp);
         }
 
@@ -190,9 +225,10 @@ contract ZeitgeistPayment is Ownable2Step {
 
     /**
      * @notice Owner sets the CLAWD price required per query.
-     * @param newPrice New CLAWD amount (base units).
+     * @param newPrice New CLAWD amount (base units). Must be non-zero.
      */
     function setQueryPriceCLAWD(uint256 newPrice) external onlyOwner {
+        if (newPrice == 0) revert InvalidPrice();
         uint256 old = queryPriceCLAWD;
         queryPriceCLAWD = newPrice;
         emit QueryPriceCLAWDUpdated(old, newPrice);
@@ -201,18 +237,18 @@ contract ZeitgeistPayment is Ownable2Step {
     /**
      * @notice Withdraw all accumulated ETH and CLAWD to the owner.
      */
-    function withdraw() external onlyOwner {
+    function withdraw() external onlyOwner nonReentrant {
         _withdrawETH();
         _withdrawCLAWD();
     }
 
     /// @notice Withdraw all accumulated ETH to the owner.
-    function withdrawETH() external onlyOwner {
+    function withdrawETH() external onlyOwner nonReentrant {
         _withdrawETH();
     }
 
     /// @notice Withdraw all accumulated CLAWD to the owner.
-    function withdrawCLAWD() external onlyOwner {
+    function withdrawCLAWD() external onlyOwner nonReentrant {
         _withdrawCLAWD();
     }
 
