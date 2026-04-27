@@ -99,6 +99,24 @@ const Home: NextPage = () => {
   const [approveCooldownUntil, setApproveCooldownUntil] = useState(0);
   const [now, setNow] = useState(() => Date.now());
   const pollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const approveFailsafeRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const clearApproveFailsafe = useCallback(() => {
+    if (approveFailsafeRef.current) {
+      clearTimeout(approveFailsafeRef.current);
+      approveFailsafeRef.current = null;
+    }
+  }, []);
+
+  // cleanup on unmount
+  useEffect(() => {
+    return () => {
+      if (approveFailsafeRef.current) {
+        clearTimeout(approveFailsafeRef.current);
+        approveFailsafeRef.current = null;
+      }
+    };
+  }, []);
 
   // ------- Reads -------
   const { data: ethRequiredWei } = useScaffoldReadContract({
@@ -233,6 +251,14 @@ const Home: NextPage = () => {
   const handleApprove = useCallback(async () => {
     if (!connectedAddress || needsApproval === false) return;
     setApproveSubmitting(true);
+    // Failsafe: if the receipt is never observed (tx dropped, indexer lag,
+    // wallet closed before signing), still re-enable the button after 60s
+    // so the user is never stuck.
+    clearApproveFailsafe();
+    approveFailsafeRef.current = setTimeout(() => {
+      setApproveSubmitting(false);
+      approveFailsafeRef.current = null;
+    }, 60_000);
     try {
       const hash = await approveClawd({
         abi: CLAWD_ABI,
@@ -249,9 +275,10 @@ const Home: NextPage = () => {
     } catch (err) {
       const parsed = getParsedErrorWithAllAbis(err, base.id);
       notification.error(parsed);
+      clearApproveFailsafe();
       setApproveSubmitting(false);
     }
-  }, [approveClawd, connectedAddress, needsApproval, requiredClawd]);
+  }, [approveClawd, clearApproveFailsafe, connectedAddress, needsApproval, requiredClawd]);
 
   const [pendingApproveTx, setPendingApproveTx] = useState<`0x${string}` | undefined>();
   const { data: approveReceipt } = useWaitForTransactionReceipt({
@@ -262,12 +289,13 @@ const Home: NextPage = () => {
 
   useEffect(() => {
     if (!approveReceipt) return;
+    clearApproveFailsafe();
     setApproveSubmitting(false);
     setApproveCooldownUntil(Date.now() + APPROVE_COOLDOWN_MS);
     refetchClawdAllowance();
     notification.success("CLAWD approved.");
     setPendingApproveTx(undefined);
-  }, [approveReceipt, refetchClawdAllowance]);
+  }, [approveReceipt, clearApproveFailsafe, refetchClawdAllowance]);
 
   const handleSubmit = useCallback(async () => {
     if (!connectedAddress) return;
